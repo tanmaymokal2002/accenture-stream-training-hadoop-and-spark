@@ -99,6 +99,13 @@ When you search for a product on Amazon, compute resources process your request 
 ### 💡 Explanation
 
 A Server is a computer that provides services, applications, or data to other computers (clients) over a network.
+In cloud computing, the cloud provider (Azure, AWS, GCP) owns and manages the physical servers in its data centers.
+
+For example:
+
+Microsoft buys powerful physical machines.
+These machines are installed in Azure data centers around the world.
+You never see or touch them.
 
 ### 📌 Real-World Example
 
@@ -114,7 +121,7 @@ When you open Netflix, your request is processed by cloud servers that stream th
 
 ### 💡 Explanation
 
-An Instance is a running virtual or physical server created by a cloud provider.
+An Instance is a running virtual or physical server created by a cloud provider.Think of it as a slice of a powerful physical server(created by cloud provider we saw above)
 
 ### 📌 Real-World Example
 
