@@ -1,4 +1,4 @@
-# Module 1: Cloud Computing
+3# Module 1: Cloud Computing
 
 ## 🎯 Learning Objectives
 
@@ -112,7 +112,7 @@ A company migrates its SQL Server database to an Azure Virtual Machine. Azure ma
 
 ### 💡 Explanation
 
-The cloud provider manages the infrastructure, operating system, runtime, and middleware. Developers focus only on writing and deploying applications.
+The cloud provider manages the infrastructure(such as Virtual Machines (VMs), networking, storage, operating system, runtime, and middleware), operating system, runtime, and middleware. Developers focus only on writing and deploying applications.
 
 ### 📌 Real-World Example
 
