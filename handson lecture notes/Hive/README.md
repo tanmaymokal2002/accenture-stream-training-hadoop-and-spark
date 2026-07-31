@@ -377,5 +377,3 @@ SELECT * FROM webclicks;
 > Note: `date` and `time` are reserved-ish words in some SQL dialects — backticks (`` `date` ``) keep Hive from misreading them as keywords. `time-spent` and similar hyphenated names also need backticks since Hive would otherwise parse the hyphen as subtraction.
 
 ---
-
-_More notes to be added._
