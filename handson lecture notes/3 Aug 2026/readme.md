@@ -6,7 +6,7 @@ _Compiled 01 Aug 2026_
 
 ## How to use this document
 
-This document starts with **why** each technique or activity exists (the use case), then walks through the actual commands **one at a time**, explaining every word in the command the first time it appears, followed by real example outputs where available. It covers, in order: a full NYC Yellow Taxi HDFS + Hive external table setup activity, a data validation + analytical queries activity built on top of it, and then the core partitioning concepts (static and dynamic).
+This document starts with **why** each technique or activity exists (the use case), then walks through the actual commands **one at a time**, explaining every word in the command the first time it appears, followed by real example outputs where available. It covers, in order: a full NYC Yellow Taxi HDFS + Hive external table setup activity, a data validation + analytical queries activity built on top of it, then the two core performance-tuning techniques — partitioning (static and dynamic) and bucketing.
 
 ---
 
@@ -346,6 +346,8 @@ LIMIT 1;
 
 ---
 
+## Use case: why partitioning matters
+
 Once a Hive table grows large (millions of rows), a query that filters on one column — e.g. "show me only department D001's employees" — still has to scan the **entire table** unless Hive knows how to skip irrelevant data. This is slow and wasteful.
 
 **Partitioning** solves this by splitting the table's underlying data into smaller physical sub-folders based on a column's value, so a filtered query only reads the relevant folder instead of the whole table.
@@ -630,15 +632,201 @@ Notice the `/` in each partition name — this reflects the actual **nested fold
 
 ---
 
+## Steps — Bucketing
+
+**Use case:** Partitioning works great when a column has a small, predictable set of distinct values (a handful of departments, a handful of years). But some columns — like a customer ID or, as here, a job designation with many possible values — either have too many distinct values (partitioning would create thousands of tiny sub-folders, which hurts performance instead of helping) or don't split the data evenly. **Bucketing** solves this differently: instead of one folder per distinct value, it divides rows into a **fixed number of files** using a hash function, giving you predictable, evenly-sized chunks regardless of how many distinct values the column actually has.
+
+- Divide the data based on a **hash value** of the bucketing column(s).
+- The result is a fixed **number of files** — not a variable number of folders like partitioning.
+- Physical layout: `hiveadv.db -> emp_bucket -> files (HDFS)` — notice there's no `col=value` sub-folder naming here (unlike partitioning); everything lives as numbered files directly inside the table's folder.
+
+### The core formula
+
+```
+HASH(bucketcol) % number of total buckets = Bucket number
+```
+
+- `HASH(...)` = a function that converts any input value (text, number, etc.) into a fixed numeric "fingerprint." The same input always produces the same hash value, but different inputs are spread out fairly unpredictably across the numeric range.
+- `%` = the **modulo** operator — returns the _remainder_ after division. E.g. `82405 % 4` gives `1`, because `82405 ÷ 4 = 20601` remainder `1`.
+- Combining the two: take a row's bucketing-column value, hash it, then take that hash modulo the total bucket count — the result (0, 1, 2, 3, ... up to `buckets - 1`) tells Hive exactly which bucket file that row belongs in. Every row with the _same_ bucketing-column value will always land in the _same_ bucket, since the hash is deterministic.
+
+### Step 1 — Create a bucketed table
+
+```sql
+CREATE TABLE emp_bk(mpno INT, empname STRING, age INT, gender STRING, Salary INT, Designation STRING, Deptid STRING)
+CLUSTERED BY(Designation) INTO 4 BUCKETS
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' LINES TERMINATED BY '\n';
+```
+
+- `CLUSTERED BY(Designation)` = declares `Designation` as the bucketing column — unlike `PARTITIONED BY`, the bucketing column **stays** in the regular column list (you can see `Designation` listed normally above), it isn't pulled out as a separate virtual column the way partition keys are.
+- `INTO 4 BUCKETS` = fixes the total bucket count at 4 — this is the divisor in the `% number of total buckets` formula above, and it also determines how many physical files the table's data gets split into.
+
+```sql
+SET hive.enforce.bucketing=true;
+```
+
+- Same `SET` pattern as `hive.exec.dynamic.partition` earlier — this session setting tells Hive to actually **enforce** the bucketing rule when data is inserted (i.e., genuinely hash each row and route it to the correct bucket file), rather than silently ignoring the `CLUSTERED BY` clause.
+
+### Step 2 — Load data into the bucketed table
+
+```sql
+INSERT OVERWRITE TABLE emp_bk SELECT * FROM emp_ext;
+```
+
+Standard insert — no special `PARTITION(...)` clause is needed here, since bucketing isn't about labeled sub-folders. Hive computes each row's hash automatically during the insert and writes it into the corresponding bucket file behind the scenes.
+
+### Step 3 — Sample a single bucket with `TABLESAMPLE`
+
+```sql
+SELECT * FROM emp_bk TABLESAMPLE(BUCKET 1 OUT OF 4);
+```
+
+- `TABLESAMPLE(BUCKET x OUT OF y)` = a special Hive clause that reads data from only **one specific bucket file** instead of scanning the whole table — this is bucketing's main performance win, similar in spirit to how partitioning lets a query skip irrelevant folders.
+- `BUCKET 1 OUT OF 4` = "give me bucket #1, out of a table that has 4 total buckets."
+
+**Example output — bucket 1 (empty in this run):**
+
+```
+emp_bk.mpno  emp_bk.empname  emp_bk.age  emp_bk.gender  emp_bk.salary  emp_bk.designation  emp_bk.deptid
+Time taken: 0.119 seconds
+```
+
+No rows at all — this specific dataset simply had no `Designation` values whose hash happened to land on bucket 1 out of 4.
+
+**Bucket 2 out of 4:**
+
+```
+emp_bk.mpno  emp_bk.empname  emp_bk.age  emp_bk.gender  emp_bk.salary  emp_bk.designation  emp_bk.deptid
+1206         laxmi           29          Female          35000          Lead                D004
+1205         kiran           29          Male            40000          Lead                D003
+1202         manisha         40          Female          50000          AM                  D002
+1201         gopal           45          Male            50000          AM                  D001
+Time taken: 0.098 seconds, Fetched: 4 row(s)
+```
+
+Notice **all 4 rows** here have `Designation` of either `Lead` or `AM` — never `SSE`, `SE`, or `ASE`. This is the hashing rule in action: every `Lead` row and every `AM` row happens to hash to the same bucket number, so they're grouped together regardless of which department or employee they belong to.
+
+**Bucket 3 out of 4:**
+
+```
+emp_bk.mpno  emp_bk.empname  emp_bk.age  emp_bk.gender  emp_bk.salary  emp_bk.designation  emp_bk.deptid
+1210         Satish          26          Male            25000          SE                  D004
+1209         kranthi         25          Male            22000          SE                  D003
+1211         Krishna         26          Male            25000          SE                  D004
+Time taken: 0.082 seconds, Fetched: 3 row(s)
+```
+
+All 3 rows here are `SE` — again, consistent with the hashing rule.
+
+**Bucket 4 out of 4:**
+
+```
+emp_bk.mpno  emp_bk.empname  emp_bk.age  emp_bk.gender  emp_bk.salary  emp_bk.designation  emp_bk.deptid
+1204         prasanth        28          Male            30000          SSE                 D002
+1203         khalil          27          Male            30000          SSE                 D001
+1215         Atul            24          Male            18000          ASE                 D003
+1214         Abhilasa        23          Female           15000          ASE                 D002
+1213         lavanya         24          Female           18000          ASE                 D003
+1212         Arshad          23          Male             20000          ASE                 D001
+1207         bhavya          24          Female           15000          ASE                 D001
+1208         reshma          24          Female           15000          ASE                 D002
+Time taken: 0.079 seconds, Fetched: 8 row(s)
+```
+
+A mix of `SSE` and `ASE` rows — both designations happened to hash to bucket 4.
+
+### Step 4 — Proving the hash math yourself
+
+```sql
+SELECT designation, hash(designation), hash(designation)%4 FROM emp_ext;
+```
+
+- `hash(designation)` = calls Hive's built-in `HASH()` function directly on the column, so you can see the raw hash number Hive computed for each designation value.
+- `hash(designation)%4` = applies the same modulo-4 math used internally for bucket placement, so you can verify by hand which bucket each row _should_ land in.
+
+**Example output:**
+
+```
+designation  _c1      _c2
+AM           2092     0
+SSE          82405    1
+Lead         2364284  0
+ASE          65107    3
+SE           2642     2
+```
+
+(`_c1` and `_c2` are Hive's default auto-generated column names, since the query used raw expressions like `hash(designation)` instead of named/aliased columns.)
+
+This confirms the same grouping logic seen in the sampled buckets above: rows sharing the same `designation` always produce the same hash, and therefore always land in the same bucket file together — `AM` and `Lead` share a hash-mod-4 result, `SSE` and `ASE` don't share theirs with `AM`/`Lead`, and so on. **The exact bucket number Hive labels a given file with (bucket 1, 2, 3...) is an internal detail** — what matters for understanding bucketing is the grouping behavior itself: same value in, same file out, every time. If you need to know precisely which designation lives in which numbered bucket for a real query, running `TABLESAMPLE` and checking the actual output (as done above) is more reliable than hand-calculating it.
+
+### Step 5 — Sampling with a different bucket count than the table was created with
+
+```sql
+SELECT * FROM emp_bk TABLESAMPLE(BUCKET 4 OUT OF 8);
+```
+
+⚠️ Notice this table was created `INTO 4 BUCKETS`, but this query samples `OUT OF 8`. Hive allows this — when the requested sample count is a **multiple** of the table's actual bucket count, Hive can still serve a consistent, deterministic sample by further subdividing the real bucket files logically, rather than requiring an exact match.
+
+**Example output:**
+
+```
+emp_bk.mpno  emp_bk.empname  emp_bk.age  emp_bk.gender  emp_bk.salary  emp_bk.designation  emp_bk.deptid
+1215         Atul            24          Male            18000          ASE                 D003
+1214         Abhilasa        23          Female           15000          ASE                 D002
+1213         lavanya         24          Female           18000          ASE                 D003
+1212         Arshad          23          Male             20000          ASE                 D001
+1207         bhavya          24          Female           15000          ASE                 D001
+1208         reshma          24          Female           15000          ASE                 D002
+Time taken: 0.07 seconds, Fetched: 6 row(s)
+```
+
+```sql
+SELECT * FROM emp_bk TABLESAMPLE(BUCKET 6 OUT OF 8);
+```
+
+**Example output:**
+
+```
+emp_bk.mpno  emp_bk.empname  emp_bk.age  emp_bk.gender  emp_bk.salary  emp_bk.designation  emp_bk.deptid
+1206         laxmi           29          Female          35000          Lead                D004
+1205         kiran           29          Male            40000          Lead                D003
+Time taken: 0.075 seconds, Fetched: 2 row(s)
+```
+
+**Verifying with the `%8` version of the hash formula:**
+
+```sql
+SELECT designation, hash(designation), hash(designation)%8 FROM emp_ext;
+```
+
+**Example output:**
+
+```
+designation  _c1      _c2
+AM           2092     4
+SSE          82405    5
+Lead         2364284  4
+ASE          65107    3
+SE           2642     2
+```
+
+Compare this to the `%4` version from Step 4 — the same raw hash numbers (`2092`, `82405`, `2364284`, etc.) now produce **different** remainders when divided by 8 instead of 4. This is exactly why sampling `OUT OF 8` against a table physically bucketed into only 4 files still returns a sensible, evenly-splittable subset: the underlying hash values are fixed, only the divisor used to interpret them changes.
+
+---
+
 ## Quick recap
 
-| Concept                        | Why it matters                                                                                                                                          |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Partitioning                   | Speeds up filtered queries by physically splitting data so irrelevant folders are never scanned                                                         |
-| Static partitioning            | You specify the partition value manually (`PARTITION(deptid='D001')`) — simple, safe, but repetitive for many values                                    |
-| Dynamic partitioning           | Leave partition values blank (`PARTITION(deptid)`) and Hive infers all of them from the data in one `INSERT` — requires `nonstrict` mode enabled        |
-| Multi-key dynamic partitioning | Partition by more than one column (`PARTITIONED BY(DeptID STRING, gender STRING)`) — creates nested sub-folders for every combination found in the data |
-| Column order in `SELECT`       | For dynamic inserts, partition columns must appear **last** in the `SELECT` list, in the same order as `PARTITIONED BY`                                 |
-| `LOAD DATA ... PARTITION(...)` | Does **not** work for dynamic partitioning — it's a plain file copy with no ability to inspect row values; use an `INSERT OVERWRITE ... SELECT` instead |
-| External table as source       | Keeps raw ingested data safe from accidental deletion, separate from the partitioned/managed table built on top of it                                   |
-| `SHOW PARTITIONS`              | Your sanity check — confirms exactly which partitions (or partition combinations) physically exist at any point in time                                 |
+| Concept                            | Why it matters                                                                                                                                          |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Partitioning                       | Speeds up filtered queries by physically splitting data so irrelevant folders are never scanned                                                         |
+| Static partitioning                | You specify the partition value manually (`PARTITION(deptid='D001')`) — simple, safe, but repetitive for many values                                    |
+| Dynamic partitioning               | Leave partition values blank (`PARTITION(deptid)`) and Hive infers all of them from the data in one `INSERT` — requires `nonstrict` mode enabled        |
+| Multi-key dynamic partitioning     | Partition by more than one column (`PARTITIONED BY(DeptID STRING, gender STRING)`) — creates nested sub-folders for every combination found in the data |
+| Column order in `SELECT`           | For dynamic inserts, partition columns must appear **last** in the `SELECT` list, in the same order as `PARTITIONED BY`                                 |
+| `LOAD DATA ... PARTITION(...)`     | Does **not** work for dynamic partitioning — it's a plain file copy with no ability to inspect row values; use an `INSERT OVERWRITE ... SELECT` instead |
+| External table as source           | Keeps raw ingested data safe from accidental deletion, separate from the partitioned/managed table built on top of it                                   |
+| `SHOW PARTITIONS`                  | Your sanity check — confirms exactly which partitions (or partition combinations) physically exist at any point in time                                 |
+| Bucketing                          | Splits data into a **fixed number of files** using a hash of a column — best when partitioning would create too many/too-uneven folders                 |
+| `HASH(col) % buckets`              | The core rule: same column value always hashes the same way, so identical values always land in the same bucket file                                    |
+| `CLUSTERED BY(...) INTO n BUCKETS` | Declares the bucketing column and fixed bucket count — the bucketing column stays in the normal column list (unlike partition keys)                     |
+| `TABLESAMPLE(BUCKET x OUT OF y)`   | Reads only one bucket file instead of the whole table — bucketing's main performance win, similar in spirit to partition pruning                        |
