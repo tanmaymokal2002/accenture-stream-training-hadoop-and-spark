@@ -468,7 +468,7 @@ SELECT * FROM YellowTrip_Payment_Vendor_PB WHERE payment_type = 1;
 
 ---
 
-## Quick recap
+## Quick recap — Hive
 
 | Concept                                             | Key point                                                                                                                                                                  |
 | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -483,3 +483,553 @@ SELECT * FROM YellowTrip_Payment_Vendor_PB WHERE payment_type = 1;
 | Partitioning + Bucketing together                   | Partition by the coarse filter column, bucket by the fine-grained column within each partition, for both partition pruning and even file sizes                             |
 | `EXPLAIN`                                           | Shows the execution plan — check the `Partition Description` to confirm only the filtered partition(s) are scanned                                                         |
 | Window functions (`RANK() OVER (PARTITION BY ...)`) | "Partition" here is a SQL windowing concept for ranking rows within a group — distinct from a table's physical `PARTITIONED BY` clause, even when they share a column name |
+
+---
+
+# MongoDB Practice — Collections, Import/Export & Queries
+
+_MongoDB session, taught 4th August. Same format as the Hive notes above: **what it's doing**, **why**, then the **command(s) to run**._
+
+---
+
+## How to use this section
+
+Every part below shows a Mongo shell (`mongosh`) command or a shell-level `mongoimport`/`mongoexport` call, along with a short explanation of what it does and why it's useful. Sample output from the actual session is included where it helps clarify behavior.
+
+---
+
+## Part 1 — Starting MongoDB & Basic Database Navigation
+
+### 1.1 Start the MongoDB service and open the shell
+
+```bash
+service mongod start
+mongosh
+```
+
+- `service mongod start` starts the MongoDB daemon; `mongosh` opens the interactive Mongo shell that connects to it.
+
+### 1.2 List existing databases
+
+```javascript
+show dbs
+```
+
+```
+admin    40.00 KiB
+config   72.00 KiB
+local    80.00 KiB
+```
+
+- MongoDB ships with `admin`, `config`, and `local` by default — none of these are user databases.
+
+### 1.3 Switch to (or create) a database
+
+```javascript
+use demodb
+```
+
+```
+switched to db demodb
+```
+
+- **Why:** MongoDB doesn't require an explicit `CREATE DATABASE` — a database is created lazily the first time you actually write data to it (e.g. create a collection or insert a document). `use demodb` just points the session at that name.
+
+---
+
+## Part 2 — Creating Collections
+
+### 2.1 Create a plain collection
+
+```javascript
+db.createCollection("yellowtrip");
+```
+
+```
+{ ok: 1 }
+```
+
+- Once a collection is created (or a document is inserted into a not-yet-existing collection), the database itself becomes visible in `show dbs`:
+
+```javascript
+show dbs
+```
+
+```
+admin    40.00 KiB
+config   96.00 KiB
+demodb    8.00 KiB
+local    80.00 KiB
+```
+
+### 2.2 List collections in the current database
+
+```javascript
+show collections
+```
+
+### 2.3 Capped collections
+
+**Why:** a capped collection is a **fixed-size** collection. Once it reaches its size limit, MongoDB automatically overwrites the **oldest** documents to make room for new ones — useful for logs, caches, or any "rolling window" of recent data.
+
+```javascript
+db.createCollection("weblogs", { capped: true, size: 100000 });
+```
+
+- `size` is the cap in **bytes** — once total document size hits this limit, the oldest documents are evicted first (FIFO).
+
+Optionally cap by **document count** as well, using `max`:
+
+```javascript
+db.createCollection("weblogs1", { capped: true, size: 100000, max: 10000 });
+```
+
+- `max` adds a second ceiling — whichever limit (`size` or `max`) is hit first triggers the eviction of the oldest document.
+
+General form:
+
+```javascript
+db.createCollection(<name>, <options>)
+```
+
+---
+
+## Part 3 — Inspecting Collections
+
+### 3.1 Collection statistics
+
+```javascript
+db.employee.stats();
+```
+
+- Returns storage-level details about a collection (document count, average object size, index sizes, total storage size, and so on) — useful for checking how big a collection has grown or whether it's capped.
+
+### 3.2 Metadata for all collections in the database
+
+```javascript
+db.getCollectionInfos();
+```
+
+```
+[
+  {
+    name: 'weblogs1',
+    type: 'collection',
+    options: { capped: true, size: 100000, max: 10000 },
+    info: { readOnly: false, ... }
+  },
+  ...
+]
+```
+
+- Unlike `show collections` (which just lists names), `getCollectionInfos()` returns each collection's **options** too — this is how you'd confirm a collection really is capped, and with what limits, after the fact.
+
+```javascript
+show collections
+```
+
+```
+employee
+weblogs
+weblogs1
+yellowtrip
+```
+
+---
+
+## Part 4 — Inserting Documents
+
+### 4.1 Insert a single simple document
+
+```javascript
+db.employee.insertOne({ empno: 1001, name: "Dhivya" });
+```
+
+```
+{
+  acknowledged: true,
+  insertedId: ObjectId('6a71a92af56cd9c55b8de666')
+}
+```
+
+- `insertOne` auto-generates an `_id` (an `ObjectId`) if one isn't supplied — this is MongoDB's primary key equivalent.
+
+### 4.2 Read the data back
+
+```javascript
+db.employee.find();
+```
+
+```javascript
+db.employee.find().pretty();
+```
+
+- **Why two forms:** `find()` returns the same documents either way; `.pretty()` just formats the output with indentation, which matters once documents get nested or contain arrays.
+
+### 4.3 Insert a document with a nested (embedded) sub-document
+
+**Why:** unlike a relational row, a MongoDB document can hold structured data directly — no need for a separate "address" table.
+
+```javascript
+db.employee.insertOne({
+  empno: 1002,
+  name: "Indira",
+  address: { city: "Chennai", State: "TN" },
+  dept: "LnTT",
+});
+```
+
+```javascript
+db.employee.find().pretty();
+```
+
+```
+[
+  { _id: ObjectId('6a71a92af56cd9c55b8de666'), empno: 1001, name: 'Dhivya' },
+  {
+    _id: ObjectId('6a71aaadf56cd9c55b8de667'),
+    empno: 1002,
+    name: 'Indira',
+    address: { city: 'Chennai', State: 'TN' },
+    dept: 'LnTT'
+  }
+]
+```
+
+- ⚠️ `db.find()` (calling `find` directly on `db`, without a collection name) is **not valid** — `find()` only exists on a collection object:
+
+```javascript
+db.find();
+```
+
+```
+TypeError: db.find is not a function
+```
+
+### 4.4 Insert a document with an array field
+
+```javascript
+db.employee.insertOne({
+  empno: 1003,
+  name: "Arthi",
+  Skills: ["Java", "GCP", "Spark"],
+});
+```
+
+- Arrays are a first-class field type — no join table needed to represent "one employee, many skills."
+
+### 4.5 Insert a document with an array of sub-documents
+
+**Why:** this combines both patterns above — each array element is itself a structured object, useful for one-to-many relationships like "one employee, many projects."
+
+```javascript
+db.employee.insertOne({
+  empno: 1004,
+  name: "Sathya",
+  projects: [
+    { name: "Banking", months: 24 },
+    { name: "Finance", months: 36 },
+  ],
+});
+```
+
+```javascript
+db.employee.find();
+```
+
+```
+[
+  { _id: ObjectId('6a71a92af56cd9c55b8de666'), empno: 1001, name: 'Dhivya' },
+  {
+    _id: ObjectId('6a71aaadf56cd9c55b8de667'),
+    empno: 1002,
+    name: 'Indira',
+    address: { city: 'Chennai', State: 'TN' },
+    dept: 'LnTT'
+  },
+  {
+    _id: ObjectId('6a71ab92f56cd9c55b8de668'),
+    empno: 1003,
+    name: 'Arthi',
+    Skills: [ 'Java', 'GCP', 'Spark' ]
+  },
+  {
+    _id: ObjectId('6a71ac59f56cd9c55b8de669'),
+    empno: 1004,
+    name: 'Sathya',
+    projects: [
+      { name: 'Banking', months: 24 },
+      { name: 'Finance', months: 36 }
+    ]
+  }
+]
+```
+
+### 4.6 Insert multiple documents at once
+
+```javascript
+db.employee.insertMany([
+  { empno: 1004, name: "emp4" },
+  { empno: 1005 },
+  { empno: 1006, name: "emp6" },
+]);
+```
+
+- **Why:** MongoDB has **no fixed schema** — notice `empno: 1005` has no `name` field at all, and that's perfectly valid. Every document in a collection can have a different shape. `insertMany` also batches all the writes into a single round trip instead of calling `insertOne` three times.
+
+---
+
+## Part 5 — Importing & Exporting Data
+
+### 5.1 `mongoimport` — load data from a file into a collection
+
+General form:
+
+```bash
+mongoimport --db <db> --collection <collection> --file <path>
+```
+
+Load a CSV, treating the first row as column headers:
+
+```bash
+mongoimport --db demodb --collection empFile --type csv --headerline --file emp.csv
+```
+
+- `--type csv` tells Mongo the source format; `--headerline` tells it row 1 holds field names rather than data, so those names become the document keys instead of being imported as a row of values.
+
+Same command, with a full path to the source file:
+
+```bash
+mongoimport --db demodb --collection empFile --type csv --headerline --file /home/clouduser/dataset/hive/emp.csv
+```
+
+### 5.2 `mongoexport` — dump a collection out to a file
+
+General form:
+
+```bash
+mongoexport --db <db> --collection <collection> --out <filename>
+```
+
+Export the full collection as JSON:
+
+```bash
+mongoexport --db demodb --collection empFile --out empFile.json
+```
+
+```
+2026-08-04T09:33:47.417+0000  connected to: mongodb://localhost/
+2026-08-04T09:33:47.419+0000  exported 15 records
+```
+
+Sample of the exported JSON — one document per line:
+
+```json
+{"_id":{"$oid":"6a71af643e805a09e77a2885"},"emp_id":1201,"Name":"gopal","Age":45,"Gender":"Male","Salary":50000,"Designation":"AM","Dept_id":"D001"}
+{"_id":{"$oid":"6a71af643e805a09e77a2886"},"emp_id":1202,"Name":"manisha","Age":40,"Gender":"Female","Salary":50000,"Designation":"AM","Dept_id":"D002"}
+```
+
+- Each `_id` is serialized as `{"$oid": "..."}` — MongoDB's Extended JSON representation of an `ObjectId`, since plain JSON has no native type for it.
+
+### 5.3 `mongoexport` — export as CSV, with a specific set of fields
+
+General form:
+
+```bash
+mongoexport --db <db> --collection <collection> --type csv --fields <field1,field2,...> --out <file.csv>
+```
+
+```bash
+mongoexport --db demodb --collection empFile --type=csv --fields emp_id,Name,Designation,Dept_id --out empexp.csv
+```
+
+- **Why specify `--fields`:** CSV has no way to represent MongoDB's flexible/nested schema, so you must explicitly list which top-level fields become columns — unlike the JSON export, which just dumps every field on every document as-is.
+
+### 5.4 Add more sample data before running queries
+
+```javascript
+db.empFile.insertMany([
+  {
+    emp_id: 1218,
+    Name: "Emp18",
+    Age: 24,
+    Gender: "Male",
+    Salary: 28000,
+    Designation: "ASE",
+    Dept_id: "D003",
+  },
+  {
+    emp_id: 1217,
+    Name: "Emp17",
+    Age: 32,
+    Gender: "Female",
+    Salary: 45000,
+    Designation: "ASE",
+    Dept_id: "D002",
+  },
+]);
+```
+
+---
+
+## Part 6 — Querying
+
+### 6.1 `countDocuments()` — count with and without filters
+
+```javascript
+db.empFile.countDocuments();
+```
+
+```
+18
+```
+
+- No filter argument = count of every document in the collection.
+
+Filter on a single field (equality):
+
+```javascript
+db.empFile.countDocuments({ Dept_id: "D001" });
+```
+
+```
+4
+```
+
+```javascript
+db.empFile.countDocuments({ Dept_id: "D003" });
+```
+
+```
+6
+```
+
+Filter using a comparison operator:
+
+```javascript
+db.empFile.countDocuments({ Salary: { $gt: 40000 } });
+```
+
+```
+3
+```
+
+- `$gt` = "greater than." MongoDB's query operators (`$gt`, `$gte`, `$lt`, `$lte`, `$eq`, `$ne`, ...) always sit **inside** the field's value as an object, rather than using inline symbols like SQL's `>`.
+
+### 6.2 Combine an equality filter with `$or`
+
+```javascript
+db.empFile.countDocuments({
+  Designation: "SSE",
+  $or: [{ Dept_id: "D003" }, { Dept_id: "D002" }],
+});
+```
+
+```
+1
+```
+
+- **Why:** top-level fields in a filter object are implicitly ANDed together. `$or` takes an **array** of condition objects and matches a document if **any** of them are true — so this reads as "`Designation = 'SSE'` AND (`Dept_id = 'D003'` OR `Dept_id = 'D002'`)."
+
+### 6.3 Combine a range filter with `$or`
+
+```javascript
+db.empFile.countDocuments({
+  Age: { $gt: 30 },
+  $or: [{ Dept_id: "D003" }, { Dept_id: "D002" }],
+});
+```
+
+```
+2
+```
+
+### 6.4 Range filter on two fields at once (implicit AND)
+
+```javascript
+db.empFile.countDocuments({
+  Age: { $gte: 25, $lte: 30 },
+  Salary: { $gt: 25000 },
+});
+```
+
+```
+4
+```
+
+- `$gte`/`$lte` together on the same field express a **between**-style range (inclusive on both ends), equivalent to SQL's `Age BETWEEN 25 AND 30`.
+
+### 6.5 `find()` with the same filter — retrieve matching documents, not just a count
+
+```javascript
+db.empFile.find({
+  Age: { $gt: 30 },
+  $or: [{ Dept_id: "D003" }, { Dept_id: "D002" }],
+});
+```
+
+```
+[
+  {
+    _id: ObjectId('6a71af643e805a09e77a2886'),
+    emp_id: 1202,
+    Name: 'manisha',
+    Age: 40,
+    Gender: 'Female',
+    Salary: 50000,
+    Designation: 'AM',
+    Dept_id: 'D002'
+  },
+  {
+    _id: ObjectId('6a71b6bbf56cd9c55b8de66f'),
+    emp_id: 1217,
+    Name: 'Emp17',
+    Age: 32,
+    Gender: 'Female',
+    Salary: 45000,
+    Designation: 'ASE',
+    Dept_id: 'D002'
+  }
+]
+```
+
+- **Why use `find()` over `countDocuments()`:** same filter syntax throughout Mongo — once you know how to build the filter object, swapping the method just changes whether you get a number back or the actual matching documents.
+
+### 6.6 Simple equality `find()`
+
+```javascript
+db.empFile.find({ Gender: "Female" });
+```
+
+```
+[
+  { _id: ObjectId('6a71af643e805a09e77a2886'), emp_id: 1202, Name: 'manisha', Age: 40, Gender: 'Female', Salary: 50000, Designation: 'AM', Dept_id: 'D002' },
+  { _id: ObjectId('6a71af643e805a09e77a288a'), emp_id: 1206, Name: 'laxmi', Age: 29, Gender: 'Female', Salary: 35000, Designation: 'Lead', Dept_id: 'D004' },
+  { _id: ObjectId('6a71af643e805a09e77a288b'), emp_id: 1207, Name: 'bhavya', Age: 24, Gender: 'Female', Salary: 15000, Designation: 'ASE', Dept_id: 'D001' },
+  { _id: ObjectId('6a71af643e805a09e77a288c'), emp_id: 1208, Name: 'reshma', Age: 24, Gender: 'Female', Salary: 15000, Designation: 'ASE', Dept_id: 'D002' },
+  { _id: ObjectId('6a71af643e805a09e77a2891'), emp_id: 1214, Name: 'Abhilasa', Age: 23, Gender: 'Female', Salary: 15000, Designation: 'ASE', Dept_id: 'D002' },
+  { _id: ObjectId('6a71af643e805a09e77a2893'), emp_id: 1213, Name: 'lavanya', Age: 24, Gender: 'Female', Salary: 18000, Designation: 'ASE', Dept_id: 'D003' },
+  { _id: ObjectId('6a71b6bbf56cd9c55b8de66f'), emp_id: 1217, Name: 'Emp17', Age: 32, Gender: 'Female', Salary: 45000, Designation: 'ASE', Dept_id: 'D002' }
+]
+```
+
+---
+
+## Quick recap — MongoDB
+
+| Concept                                      | Key point                                                                                                                  |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `use <db>`                                   | Switches to (and lazily creates) a database — no explicit `CREATE DATABASE` needed                                         |
+| `db.createCollection(name, options)`         | Explicitly creates a collection; needed (rather than lazy creation) whenever you must pass options, like `capped`          |
+| Capped collection                            | Fixed-size collection (`size`, optionally `max` document count); oldest documents are auto-evicted once full               |
+| `db.<collection>.stats()`                    | Storage-level stats for one collection                                                                                     |
+| `db.getCollectionInfos()`                    | Metadata (including creation options like `capped`) for every collection in the db                                         |
+| `insertOne` / `insertMany`                   | Insert one or many documents; `_id` is auto-generated as an `ObjectId` if omitted                                          |
+| Schema flexibility                           | No fixed schema — documents in the same collection can have different fields, nested sub-documents, or arrays              |
+| `db.find()` vs `db.<collection>.find()`      | `find()` only exists on a collection object, not on `db` itself                                                            |
+| `mongoimport`                                | Loads external files (e.g. CSV) into a collection; `--headerline` treats row 1 as field names                              |
+| `mongoexport`                                | Dumps a collection to a file; JSON export keeps full nested structure, CSV export requires `--fields` to flatten it        |
+| `$oid` in exported JSON                      | Extended JSON's way of representing an `ObjectId`, since plain JSON has no native type for it                              |
+| Query operators (`$gt`, `$gte`, `$lte`, ...) | Live **inside** the field's value object, unlike SQL's inline comparison symbols                                           |
+| `$or`                                        | Takes an array of condition objects; matches if **any** one of them is true. Combines with sibling fields via implicit AND |
+| `countDocuments(filter)` vs `find(filter)`   | Same filter syntax; one returns a count, the other returns the matching documents                                          |
